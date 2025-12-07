@@ -2,6 +2,7 @@ import sd
 import os
 from pathlib import Path
 from glob import glob
+import re
 from shutil import copy2
 from PySide6 import QtCore, QtWidgets, QtGui, QtUiTools
 from Tools.scripts.fixnotice import process
@@ -16,28 +17,9 @@ from sd.api.sdresourcebitmap import SDResourceBitmap
 from sd.api.sdresource import EmbedMethod
 from sd.api.sdvaluestring import SDValueString
 from sd.tools.export import exportSDGraphOutputs
+import time # ADDED for file waiting logic
 
-color_io = (
-    "normal",
-    "position",
-    "worldnormal",
-    "mads",
-    "n",
-    "bc",
-    "basecolor",
-    "albedo"
-)
-grayscale_io = (
-    "ao",
-    "curvature",
-    "thickness",
-    "metalness",
-    "metallic",
-    "roughness",
-    "smoothness",
-    "height",
-    "ambientocclusion"
-)
+# The global definitions for io_format are fine here:
 io_format = [
     "png",
     "exr",
@@ -49,7 +31,34 @@ io_format = [
 
 ui_file = Path(__file__).resolve().parent / "batch_process_dialog.ui"
 
+
 class Window(QtWidgets.QDialog):
+    
+    # Class Attributes for Map Suffixes
+    color_io = (
+        "normal",
+        "position",
+        "worldnormal",
+        "mads",
+        "n",
+        "bc",
+        "basecolor",
+        "albedo",
+        "hole" 
+    )
+    
+    grayscale_io = (
+        "ao",
+        "curvature",
+        "thickness",
+        "metalness",
+        "metallic",
+        "roughness",
+        "smoothness",
+        "height",
+        "ambientocclusion"
+    )
+
     def __init__(self, ui_file, parent, pkg_mgr, ui_mgr):
         super(Window, self).__init__(parent)
 
@@ -146,8 +155,8 @@ class Window(QtWidgets.QDialog):
 
     def browse_input_directory(self):
         path = QtWidgets.QFileDialog.getExistingDirectory(parent=self.window,
-                                                   caption="Select Input Directory",
-                                                   dir=self.input_directory)
+                                                         caption="Select Input Directory",
+                                                         dir=self.input_directory)
         if path:
             self.on_input_changed(path)
 
@@ -163,8 +172,8 @@ class Window(QtWidgets.QDialog):
 
     def browse_output_directory(self):
         path = QtWidgets.QFileDialog.getExistingDirectory(parent=self.window,
-                                                          caption="Select Output Directory",
-                                                          dir=self.output_directory)
+                                                         caption="Select Output Directory",
+                                                         dir=self.output_directory)
         if path:
             self.on_output_changed(path)
 
@@ -189,7 +198,9 @@ class Window(QtWidgets.QDialog):
         mapping['$(identifier)'] = "basecolor"
         for k, v in mapping.items():
             pattern = pattern.replace(k, v)
-        preview_text = f"Preview: {pattern}_0"
+        
+        # Updated preview to show the final naming convention
+        preview_text = f"Preview: T_banana_01_{pattern}.{self.outputFormat}" 
         self.previewLabel.setText(preview_text)
 
     def choose_processor(self):
@@ -202,27 +213,49 @@ class Window(QtWidgets.QDialog):
             processor_id = self.processor_node.getIdentifier()
             self.processNameLineEdit.setText(processor_label + "_" + processor_id)
 
-    def fetch_baked_textures(self):
-        textures = list(Path(self.input_directory).glob(f'**/*.{self.inputFormat}'))
-        return textures
+    # --- BATCH LOGIC CORE ---
+
+    def group_textures_by_asset(self):
+        """Scans the input directory and groups files by Asset ID."""
+        grouped_assets = {}
+        
+        if not self.input_directory:
+            return grouped_assets
+
+        textures = Path(self.input_directory).glob(f'*.{self.inputFormat}')
+
+        MAP_SUFFIXES = set(self.color_io) | set(self.grayscale_io)
+
+        for tex_path in textures:
+            tex_filename_stem = tex_path.stem
+            
+            parts = tex_filename_stem.rsplit('_', 1)
+            
+            if len(parts) == 2:
+                asset_id = parts[0]
+                map_suffix = parts[1].lower()
+                
+                if map_suffix in MAP_SUFFIXES:
+                    if asset_id not in grouped_assets:
+                        grouped_assets[asset_id] = {}
+                    
+                    grouped_assets[asset_id][map_suffix] = str(tex_path)
+                    
+        return grouped_assets
 
     def process_loop(self):
-        textures = self.fetch_baked_textures()
-        loop_indices = []
-        for tex in textures:
-            tex_filename = Path(tex.name).stem
-            tex_index = int(str.split(tex_filename, "_")[1])
-            if tex_index not in loop_indices:
-                loop_indices.append(tex_index)
+        all_assets = self.group_textures_by_asset()
+        asset_ids = sorted(all_assets.keys())
 
-        loop_indices.sort()
-        for index in loop_indices:
-            self.process(index)
+        if not asset_ids:
+            print("No textures found matching the new asset_id_suffix format. Check your input directory and file names.")
+            return
 
-    def process(self, index):
+        for asset_id in asset_ids:
+            self.process(asset_id, all_assets[asset_id])
+
+    def process(self, asset_id, asset_maps): 
         if self.graph is None or self.processor_node is None: return
-
-        output_nodes = []
 
         processor_node_input = self.processor_node.getProperties(SDPropertyCategory.Input)
         processor_node_output = self.processor_node.getProperties(SDPropertyCategory.Output)
@@ -234,12 +267,12 @@ class Window(QtWidgets.QDialog):
 
         self.solve_previous_resources(resource_folder)
 
-        self.fetch_input(processor_node_input, processor_pos, index, resource_folder)
+        self.fetch_input(processor_node_input, processor_pos, asset_maps, resource_folder) 
 
-        self.generate_output(processor_node_output, processor_pos, index)
+        self.generate_output(processor_node_output, processor_pos, asset_id)
+
 
     def get_resource_folder(self, pkg):
-        # get/create resources folder
         resource_folder = None
         all_resources = pkg.getChildrenResources(True)
         for res in all_resources:
@@ -252,7 +285,6 @@ class Window(QtWidgets.QDialog):
         return resource_folder
 
     def solve_previous_resources(self, resource_folder):
-        # delete all prev loaded bitmap and nodes
         all_nodes = self.graph.getNodes()
         loaded_resources = resource_folder.getChildren(False)
         loaded_resources_path = []
@@ -268,8 +300,7 @@ class Window(QtWidgets.QDialog):
         for res in loaded_resources:
             res.delete()
 
-    def fetch_input(self, processor_node_input, processor_pos, index, resource_folder):
-        # get input count for layout of input bitmap nodes
+    def fetch_input(self, processor_node_input, processor_pos, asset_maps, resource_folder): 
         input_count = 0
         for prop in processor_node_input:
             if isinstance(prop.getType(), SDTypeTexture):
@@ -279,40 +310,52 @@ class Window(QtWidgets.QDialog):
         for prop in processor_node_input:
             if not isinstance(prop.getType(), SDTypeTexture): continue
 
-            prop_id = prop.getId().lower()
+            prop_id = prop.getId().lower() 
 
             input_bitmap_node = self.graph.newNode("sbs::compositing::bitmap")
             pos_y = processor_pos.y - ((input_count - 1) * 150) / 2 + prop_index * 150
             input_bitmap_node.setPosition(float2(processor_pos.x - 200, pos_y))
-            # setting color mode based on processor's prop id
+            
             color_mode_prop = input_bitmap_node.getPropertyFromId('colorswitch', SDPropertyCategory.Input)
-            if prop_id in color_io:
+            
+            if prop_id in self.color_io: 
                 input_bitmap_node.setPropertyValue(color_mode_prop, SDValueBool.sNew(True))
-            elif prop_id in grayscale_io:
+            elif prop_id in self.grayscale_io: 
                 input_bitmap_node.setPropertyValue(color_mode_prop, SDValueBool.sNew(False))
 
-            # load bitmap resources
-            textures = self.fetch_baked_textures()
-            for tex in textures:
-                # get texture's name and id
-                tex_filename = Path(tex.name).stem
-                tex_name = str.split(tex_filename, "_")[0]
-                tex_index = int(str.split(tex_filename, "_")[1])
+            map_path = asset_maps.get(prop_id)
 
-                if tex_name == prop_id and tex_index == index:
-                    tex_resource = SDResourceBitmap.sNewFromFile(resource_folder, str(tex), EmbedMethod.Linked)
-                    bitmap_resource_property = input_bitmap_node.getPropertyFromId("bitmapresourcepath",
-                                                                                   SDPropertyCategory.Input)
-                    pkg_res_path = SDValueString.sNew(tex_resource.getUrl())
-                    input_bitmap_node.setPropertyValue(bitmap_resource_property, pkg_res_path)
-
+            if map_path:
+                tex_resource = SDResourceBitmap.sNewFromFile(resource_folder, map_path, EmbedMethod.Linked)
+                
+                bitmap_resource_property = input_bitmap_node.getPropertyFromId("bitmapresourcepath",
+                                                                                SDPropertyCategory.Input)
+                pkg_res_path = SDValueString.sNew(tex_resource.getUrl())
+                input_bitmap_node.setPropertyValue(bitmap_resource_property, pkg_res_path)
+            else:
+                print(f"Warning: No texture found for input '{prop_id}' for asset {prop_id}")
+            
             bitmap_output_prop = input_bitmap_node.getPropertyFromId("unique_filter_output",
-                                                                     SDPropertyCategory.Output)
+                                                                    SDPropertyCategory.Output)
+            
+            # --- THE CRITICAL FIX: Correct Connection Call ---
+            # Source Node (bitmap) connects Source Prop (output) to Destination Node (processor) Dest Prop (input)
             input_bitmap_node.newPropertyConnection(bitmap_output_prop, self.processor_node, prop)
 
             prop_index = prop_index + 1
 
-    def generate_output(self, processor_node_output, processor_pos, index):
+    def wait_for_file_export(self, filepath, timeout=10.0, interval=0.1):
+        """Waits for the exported file to exist and have a non-zero size."""
+        start_time = time.time()
+        
+        while time.time() < start_time + timeout:
+            if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
+                return True
+            time.sleep(interval)
+            
+        return False
+
+    def generate_output(self, processor_node_output, processor_pos, asset_id): 
         output_count = processor_node_output.getSize()
         output_nodes = []
         output_index = 0
@@ -339,7 +382,7 @@ class Window(QtWidgets.QDialog):
             output_node_input = output_node.getPropertyFromId("inputNodeOutput", SDPropertyCategory.Input)
             self.processor_node.newPropertyConnection(output, output_node, output_node_input)
 
-            output_ids.append(output.getId())
+            output_ids.append(output.getId().lower()) # Ensure lowercase
             output_index = output_index + 1
 
         if len(output_nodes) > 0:
@@ -356,14 +399,31 @@ class Window(QtWidgets.QDialog):
             tex_files.sort(key=os.path.getmtime, reverse=True)
             latest_text_files = tex_files[:output_index]
             output_ids.reverse()
+
             for i, tex in enumerate(latest_text_files):
+                
+                # Wait for the file to be completely written 
+                if not self.wait_for_file_export(tex):
+                    print(f"Error: Export timeout/failure for file: {tex}")
+                    continue
+
                 mapping["$(identifier)"] = output_ids[i]
-                pattern = self.pattern
+                
+                pattern_result = self.pattern
                 for k, v in mapping.items():
-                    pattern = pattern.replace(k, v)
-                target_file = os.path.join(self.output_directory, f"{pattern}_{index}.{self.outputFormat}")
+                    pattern_result = pattern_result.replace(k, v)
+                
+                # FINAL NAMING: T_ prefix, asset_id first, then pattern result
+                # Structure: T_{asset_id}_{pattern_result}.{format}
+                target_file = os.path.join(
+                    self.output_directory, 
+                    f"T_{asset_id}_{pattern_result}.{self.outputFormat}"
+                ) 
+                
                 copy2(tex, target_file)
                 os.remove(tex)
+
+# --- END OF BATCH LOGIC CORE ---
 
 context = sd.getContext()
 app = context.getSDApplication()
@@ -371,12 +431,9 @@ app = context.getSDApplication()
 pkg_mgr = app.getPackageMgr()
 ui_mgr = app.getQtForPythonUIMgr()
 
-# get loaded packages
-all_pkgs = pkg_mgr.getPackages()
-
 main_window = ui_mgr.getMainWindow()
 
-menu_id = "HuangJuanLr" + "#BatchProcess"
+menu_id = "MohdQasim" + "#BatchProcess"
 
 def show_plugin():
     win = Window(ui_file, main_window, pkg_mgr, ui_mgr)
@@ -388,7 +445,7 @@ menu = ui_mgr.findMenuFromObjectName(menu_id)
 if menu is not None:
     ui_mgr.deleteMenu(menu_id)
 
-menu = QtWidgets.QMenu("HuangJuanLr", menu_bar)
+menu = QtWidgets.QMenu("MohdQasim", menu_bar)
 menu.setObjectName(menu_id)
 menu_bar.addMenu(menu)
 action = QtGui.QAction("Batch Process", menu)
