@@ -1,3 +1,13 @@
+#
+# Original Code by HuangJuanLR
+# Copyright (c) 2024 HuangJuanLR
+#
+# This software is released under the MIT License.
+#
+# --- MODIFICATIONS ---
+# Copyright (c) 2025 Mohammad Qasim
+# All modifications are also licensed under the MIT License.
+#
 import sd
 import os
 from pathlib import Path
