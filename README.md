@@ -1,3 +1,14 @@
+# Adjusted Batch Processor for Substance Designer (Based on sd_plugin_tuto)
+
+## Key Features of This Version
+
+* **Batch Asset Grouping:** Processes multiple assets (e.g., `asset1_basecolor`, `asset2_basecolor`) in one go.
+* **UE Naming:** Exports files with the required `T_assetID_mapType` prefix.
+
+
+
+
+
 # Batch Process Tool
 
 ## Example:
