@@ -1,6 +1,6 @@
 # Adjusted Batch Processor for Substance Designer (Based on sd_plugin_tuto)
 ## Project Origin
-This porject is a fork/derivative of the original work by HuangJuanLR. https://github.com/HuangJuanLR/sd_plugin_tuto
+This project is a fork/derivative of the original work by HuangJuanLR. https://github.com/HuangJuanLR/sd_plugin_tuto
 
 ## Key Features of This Version
 
@@ -17,7 +17,7 @@ This porject is a fork/derivative of the original work by HuangJuanLR. https://g
 ![batch_processor](tutorial/batch_processor.gif)
 
 
-Please follow the instruction below to use the plugin
+Please follow the instructions below to use the plugin
 
 ### Only rule to follow
 ![rules](tutorial/rules.png)
